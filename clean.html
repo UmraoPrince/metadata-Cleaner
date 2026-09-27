@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Image Metadata Stripper</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #1a1d27;
+    --border: #2a2e3d;
+    --accent: #4f8cff;
+    --text: #e6e9f0;
+    --muted: #8a91a5;
+    --danger: #ff5c5c;
+    --ok: #3ddc84;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 16px;
+  }
+  h1 { font-size: 1.6rem; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 28px; }
+  .container { width: 100%; max-width: 860px; display: flex; flex-direction: column; gap: 20px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .dropzone {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 40px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  .dropzone:hover, .dropzone.dragover {
+    border-color: var(--accent);
+    background: rgba(79, 140, 255, 0.05);
+  }
+  .dropzone p { color: var(--muted); }
+  .results { display: none; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .results.visible { display: grid; }
+  @media (max-width: 640px) { .results.visible { grid-template-columns: 1fr; } }
+  .imgbox img { width: 100%; border-radius: 8px; display: block; }
+  .imgbox h3 { font-size: 0.95rem; margin-bottom: 8px; color: var(--muted); font-weight: 600; }
+  .stats { font-size: 0.85rem; line-height: 1.7; margin-top: 10px; }
+  .stats b { color: var(--text); }
+  .btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 24px;
+    font-size: 0.95rem;
+    cursor: pointer;
+    margin-top: 16px;
+    width: 100%;
+    display: block;
+    text-align: center;
+    text-decoration: none;
+  }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .badge { font-size: 0.75rem; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
+  .badge.found { background: rgba(255, 92, 92, 0.15); color: var(--danger); }
+  .badge.clean { background: rgba(61, 220, 132, 0.15); color: var(--ok); }
+  .note { color: var(--muted); font-size: 0.8rem; line-height: 1.6; margin-top: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 12px; }
+  td, th { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  td:first-child { color: var(--muted); }
+  .hidden { display: none; }
+  .error { color: var(--danger); font-size: 0.9rem; margin-top: 12px; }
+</style>
+</head>
+<body>
+  <h1>Image Metadata Stripper</h1>
+  <div class="subtitle">Client-side EXIF / XMP / IPTC removal via canvas re-encoding — files never leave your browser</div>
+
+  <div class="container">
+    <div class="card">
+      <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="Select or drop an image">
+        <p>Drop an image here or click to select</p>
+        <input type="file" id="fileInput" accept="image/*" class="hidden">
+      </div>
+      <div class="error hidden" id="errorBox"></div>
+    </div>
+
+    <div class="results" id="results">
+      <div class="card imgbox">
+        <h3>Original <span class="badge clean" id="origBadge">checking…</span></h3>
+        <img id="origImg" alt="original">
+        <div class="stats" id="origStats"></div>
+        <table id="metaTable"></table>
+      </div>
+      <div class="card imgbox">
+        <h3>Stripped <span class="badge clean">clean</span></h3>
+        <img id="newImg" alt="stripped">
+        <div class="stats" id="newStats"></div>
+        <a id="downloadLink" class="btn" download>Download Stripped Image</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="note">
+        <b>How it works:</b> the image is decoded to raw pixels and re-encoded via a
+        &lt;canvas&gt;, which discards all embedded metadata segments (EXIF, XMP, IPTC, JUMBF).<br>
+        <b>Limitations:</b> re-encoding is lossy for JPEG quality settings; PNG → re-encoded PNG.
+        C2PA / Content Credentials manifests are also discarded — a file with <i>no</i>
+        provenance manifest is itself detectable by platforms. This tool does not and cannot
+        defeat AI-content classifiers, which analyze pixels/audio, not just metadata.
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  const dropzone   = document.getElementById("dropzone");
+  const fileInput  = document.getElementById("fileInput");
+  const errorBox   = document.getElementById("errorBox");
+  const results    = document.getElementById("results");
+  const origImg    = document.getElementById("origImg");
+  const newImg     = document.getElementById("newImg");
+  const origStats  = document.getElementById("origStats");
+  const newStats   = document.getElementById("newStats");
+  const origBadge  = document.getElementById("origBadge");
+  const metaTable  = document.getElementById("metaTable");
+  const dl         = document.getElementById("downloadLink");
+
+  /* ---------- helpers ---------- */
+
+  const MAX_DECODE_DIM = 8192; // guard against canvas memory limits
+
+  function formatBytes(n) {
+    if (n >= 1048576) return (n / 1048576).toFixed(2) + " MB";
+    if (n >= 1024)    return (n / 1024).toFixed(1) + " KB";
+    return n + " B";
+  }
+
+  function showError(msg) {
+    errorBox.textContent = msg;
+    errorBox.classList.remove("hidden");
+  }
+
+  function clearError() {
+    errorBox.textContent = "";
+    errorBox.classList.add("hidden");
+  }
+
+  /**
+   * Search a byte array for an ASCII needle WITHOUT building a giant JS string.
+   * Avoids both the String.fromCharCode.apply stack limit and huge string allocs.
+   */
+  function bytesContain(bytes, needle) {
+    outer:
+    for (let i = 0; i <= bytes.length - needle.length; i++) {
+      for (let j = 0; j < needle.length; j++) {
+        if (bytes[i + j] !== needle.charCodeAt(j)) continue outer;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Scan the ENTIRE file (metadata such as C2PA/JUMBF and trailing XMP
+   * is frequently appended at the end of JPEGs, not the start).
+   */
+  function detectMetadataMarkers(buffer) {
+    const bytes = new Uint8Array(buffer);
+    // Decode in 1 MB chunks with overlap so a marker split across a
+    // chunk boundary is still found.
+    const CHUNK = 1 << 20, OVERLAP = 1024;
+    let haystack = "";
+    const found = new Set();
+
+    const needles = {
+      "EXIF":         "Exif\u0000\u0000",
+      "XMP":          "http://ns.adobe.com/xap/1.0/",
+      "IPTC":         "Photoshop 3.0\u0000",
+      "ICC profile":  "ICC_PROFILE",
+      "JUMBF (C2PA)": "jumb",
+      "GPS data":     "GPS"
+    };
+    const keys = Object.keys(needles);
+
+    for (let off = 0; off < bytes.length; off += CHUNK - OVERLAP) {
+      const end = Math.min(bytes.length, off + CHUNK);
+      // Decode chunk to a string (1 MB is safe for fromCharCode.apply,
+      // but we chunk manually anyway to be engine-proof).
+      let part = "";
+      const SUB = 65536;
+      for (let i = off; i < end; i += SUB) {
+        part += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(end, i + SUB)));
+      }
+      haystack = haystack.slice(-OVERLAP) + part; // carry overlap forward
+      for (const k of keys) {
+        if (!found.has(k) && haystack.includes(needles[k])) found.add(k);
+      }
+      if (found.size === keys.length) break;
+    }
+
+    const result = {};
+    for (const k of keys) result[k] = found.has(k);
+    return result;
+  }
+
+  function renderMetaTable(markers) {
+    metaTable.innerHTML = "<tr><th>Segment</th><th>Status</th></tr>" +
+      Object.entries(markers).map(([k, v]) =>
+        `<tr><td>${k}</td><td>${v ? "✔ present" : "—"}</td></tr>`
+      ).join("");
+    const any = Object.values(markers).some(Boolean);
+    origBadge.textContent = any ? "metadata found" : "no metadata detected";
+    origBadge.className = "badge " + (any ? "found" : "clean");
+  }
+
+  /* ---------- object URL lifecycle ---------- */
+
+  let currentUrls = [];
+  function trackUrl(url) { currentUrls.push(url); return url; }
+  function releaseUrls() {
+    currentUrls.forEach(u => URL.revokeObjectURL(u));
+    currentUrls = [];
+  }
+
+  /* ---------- main pipeline ---------- */
+
+  async function processFile(file) {
+    clearError();
+    releaseUrls(); // free previous uploads' blobs before starting
+
+    if (!file || !file.type.startsWith("image/")) {
+      showError("Please select a valid image file.");
+      return;
+    }
+
+    results.classList.add("visible");
+    origBadge.textContent = "checking…";
+    origBadge.className = "badge clean";
+    metaTable.innerHTML = "";
+    origStats.innerHTML = "";
+    newStats.innerHTML = "";
+    dl.removeAttribute("href");
+    dl.setAttribute("aria-disabled", "true");
+
+    try {
+      // --- Original: raw-byte marker scan (full file) ---
+      const origBuf = await file.arrayBuffer();
+      origImg.src = trackUrl(URL.createObjectURL(file));
+      const markers = detectMetadataMarkers(origBuf);
+      renderMetaTable(markers);
+      origStats.innerHTML = `<b>Size:</b> ${formatBytes(file.size)}<br><b>Type:</b> ${file.type || "unknown"}`;
+
+      // --- Decode ---
+      const img = await new Promise((resolve, reject) => {
+        const i = new Image();
+        i.onload  = () => resolve(i);
+        i.onerror = () => reject(new Error("Could not decode this image (format unsupported or file corrupt)."));
+        i.src = origImg.src;
+      });
+
+      let w = img.naturalWidth, h = img.naturalHeight;
+      if (!w || !h) throw new Error("Image has no drawable dimensions.");
+      if (w > MAX_DECODE_DIM || h > MAX_DECODE_DIM) {
+        const scale = MAX_DECODE_DIM / Math.max(w, h);
+        w = Math.round(w * scale);
+        h = Math.round(h * scale);
+      }
+
+      // --- Re-encode: this is what strips every metadata segment ---
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, w, h);
+
+      const isPng = file.type === "image/png";
+      const mime  = isPng ? "image/png" : "image/jpeg";
+      const blob  = await new Promise(res => canvas.toBlob(res, mime, 0.92));
+      if (!blob) throw new Error("Re-encoding failed.");
+      canvas.width = canvas.height = 0; // free canvas memory
+
+      // --- Stripped output ---
+      const newUrl = trackUrl(URL.createObjectURL(blob));
+      newImg.src = newUrl;
+      const delta = Math.round((1 - blob.size / file.size) * 100);
+      const deltaTxt = delta > 0 ? `${delta}% smaller`
+                     : delta < 0 ? `${-delta}% larger (PNG re-encode can grow)`
+                     : "same size";
+      newStats.innerHTML =
+        `<b>Size:</b> ${formatBytes(blob.size)}<br>` +
+        `<b>Type:</b> ${mime}<br>` +
+        `<b>Change:</b> ${deltaTxt}`;
+
+      const baseName = (file.name || "image").replace(/\.[^.]+$/, "");
+      dl.href = newUrl;
+      dl.download = `${baseName}-stripped.${isPng ? "png" : "jpg"}`;
+      dl.removeAttribute("aria-disabled");
+
+    } catch (err) {
+      showError(err.message || "Something went wrong while processing the image.");
+      releaseUrls();
+      results.classList.remove("visible");
+    }
+  }
+
+  /* ---------- events ---------- */
+
+  dropzone.addEventListener("click", () => fileInput.click());
+  dropzone.addEventListener("keydown", e => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
+  });
+
+  dropzone.addEventListener("dragover", e => {
+    e.preventDefault();
+    dropzone.classList.add("dragover");
+  });
+  dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
+
+  dropzone.addEventListener("drop", e => {
+    e.preventDefault();
+    dropzone.classList.remove("dragover");
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) processFile(f);
+  });
+
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files && fileInput.files[0]) processFile(fileInput.files[0]);
+    fileInput.value = ""; // allow re-selecting the same file
+  });
+})();
+</script>
+</body>
+</html>
